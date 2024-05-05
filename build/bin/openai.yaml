@@ -1,0 +1,9 @@
+enableAzure: true
+openai:
+    key:
+    endpoint: https://api.openai.com/v1
+    deployment: gpt-4-1106-preview
+azure:
+    key:
+    endpoint:
+    deployment: gpt-4-1106-preview
