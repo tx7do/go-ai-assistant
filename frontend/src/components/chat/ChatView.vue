@@ -1,32 +1,29 @@
 <template>
-  <div class="h-full relative flex flex-col">
-    <!-- 消息记录内容（用于全屏展示） -->
+  <div class="chat-root">
     <n-scrollbar
-        ref="historyRef"
-        class="relative"
-        :content-style="loadingHistory ? { height: '100%' } : {}"
+      ref="historyRef"
+      class="chat-scrollbar"
+      :content-style="loadingHistory ? { height: '100%' } : {}"
     >
-      <!-- 回到底部按钮 -->
-      <div class="right-2 bottom-5 absolute z-20">
+      <div class="scroll-to-bottom-btn">
         <n-button secondary circle size="small" @click="scrollToBottom(true)">
           <template #icon>
-            <n-icon :component="ArrowDown"/>
+            <n-icon :component="ArrowDown" />
           </template>
         </n-button>
       </div>
       <HistoryContent
-          ref="historyContentRef"
-          :extra-messages="currentActiveMessages"
-          :fullscreen="false"
-          :show-tips="showFullscreenTips"
-          :loading="loadingHistory"
+        ref="historyContentRef"
+        :extra-messages="currentActiveMessages"
+        :fullscreen="false"
+        :show-tips="showFullscreenTips"
+        :loading="loadingHistory"
       />
     </n-scrollbar>
-    <!-- 下半部分（回复区域） -->
-    <InputRegion
+    <div class="chat-input-region-wrapper">
+      <InputRegion
         v-model:input-value="inputValue"
         v-model:auto-scrolling="autoScrolling"
-        class="sticky bottom-0 z-10"
         :can-abort="canAbort"
         :send-disabled="sendDisabled"
         @abort-request="abortRequest"
@@ -34,7 +31,8 @@
         @export-to-pdf-file="exportToPdfFile"
         @send-msg="sendMsg"
         @show-fullscreen-history="showFullscreenHistory"
-    />
+      />
+    </div>
   </div>
 </template>
 
@@ -295,17 +293,75 @@ const exportToMarkdownFile = () => {
 </script>
 
 <style scoped>
+.chat-root {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  width: 100vw;
+  background: var(--n-color);
+  position: relative;
+}
+
+.chat-input-region-wrapper {
+  position: fixed;
+  left: 0;
+  bottom: 0;
+  width: 100vw;
+  z-index: 30;
+  background: var(--n-color);
+  box-shadow: 0 -2px 8px rgba(0,0,0,0.04);
+  padding: 0 0 0 0;
+  display: flex;
+  justify-content: center;
+}
+
+.chat-input-region-wrapper > * {
+  width: 100vw;
+  max-width: 900px;
+}
+
+.chat-scrollbar {
+  flex: 1 1 0%;
+  min-height: 0;
+  max-height: calc(100vh - 80px);
+  padding-bottom: 120px;
+  background: transparent;
+  width: 100vw;
+  box-sizing: border-box;
+}
+
+.scroll-to-bottom-btn {
+  position: absolute;
+  right: 16px;
+  bottom: 80px;
+  z-index: 20;
+}
+
+@media (min-width: 1024px) {
+  .chat-root {
+    width: 100vw;
+    max-width: 900px;
+    margin: 0 auto;
+  }
+  .chat-input-region-wrapper {
+    left: 50%;
+    transform: translateX(-50%);
+    max-width: 900px;
+    width: 100vw;
+    padding: 0;
+  }
+  .chat-input-region-wrapper > * {
+    width: 100%;
+    max-width: 900px;
+  }
+  .chat-scrollbar {
+    max-width: 900px;
+    margin: 0 auto;
+  }
+}
+
 textarea.n-input__textarea-el {
   resize: none;
-}
-
-div.n-menu-item-content-header {
-  display: flex;
-  justify-content: space-between;
-}
-
-span.n-menu-item-content-header__extra {
-  display: inline-block;
 }
 
 .left-col .n-card__content {
@@ -316,12 +372,10 @@ span.n-menu-item-content-header__extra {
   body * {
     visibility: hidden;
   }
-
   #print-content * {
     visibility: visible;
   }
 
-  /* no margin in page */
   @page {
     margin-left: 0;
     margin-right: 0;
