@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -112,4 +113,20 @@ func SaveYaml[T interface{}](filePath string, cfg *T) error {
 	}
 
 	return nil
+}
+
+// WriteTempFile 写入临时文件并返回路径
+func WriteTempFile(fileName string, data []byte) (string, error) {
+	dir := os.TempDir()
+	filePath := filepath.Join(dir, fmt.Sprintf("%d_%s", time.Now().UnixNano(), fileName))
+	err := os.WriteFile(filePath, data, 0644)
+	if err != nil {
+		return "", err
+	}
+	return filePath, nil
+}
+
+// RemoveFile 删除指定文件
+func RemoveFile(filePath string) {
+	_ = os.Remove(filePath)
 }

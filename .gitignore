@@ -148,3 +148,5 @@ node_modules
 frontend/dist
 
 *.7z
+
+/.idea

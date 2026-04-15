@@ -1,23 +1,19 @@
 package azopenai
 
 import (
-	"bytes"
 	"context"
 	"fmt"
 	"log"
 	"path/filepath"
 	"time"
 
-	"github.com/Azure/azure-sdk-for-go/sdk/ai/azopenaiassistants"
-	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
-	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
-	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
+	"github.com/sashabaranov/go-openai"
 
 	"go-ai-assistant/internal/utils"
 )
 
 type Client struct {
-	cli *azopenaiassistants.Client
+	cli *openai.Client
 
 	cfg *AssistantConfig
 	opt *AIOptions
@@ -32,52 +28,9 @@ func NewClient() *Client {
 	_ = cli.opt.LoadConfig()
 	_ = cli.cfg.LoadConfig()
 
-	cli.cli = cli.createAssistantClient(cli.opt)
+	cli.cli = openai.NewClient(cli.opt.OpenAI.Key)
 
 	return cli
-}
-
-// createAssistantClient 创建助手客户端
-func (c *Client) createAssistantClient(opt *AIOptions) *azopenaiassistants.Client {
-	if opt.EnableAzure {
-		return c.createAssistantClientFromAzure(opt)
-	} else {
-		return c.createAssistantClientFromOpenAI(opt)
-	}
-}
-
-func (c *Client) createAssistantClientFromAzure(opt *AIOptions) *azopenaiassistants.Client {
-	opts := &azopenaiassistants.ClientOptions{
-		ClientOptions: policy.ClientOptions{
-			Logging: policy.LogOptions{
-				IncludeBody: true,
-			},
-		},
-	}
-
-	tmpClient, err := azopenaiassistants.NewClientWithKeyCredential(opt.Azure.Endpoint, azcore.NewKeyCredential(opt.Azure.Key), opts)
-	if err != nil {
-		log.Println(err.Error())
-		return nil
-	}
-	return tmpClient
-}
-
-func (c *Client) createAssistantClientFromOpenAI(opt *AIOptions) *azopenaiassistants.Client {
-	opts := &azopenaiassistants.ClientOptions{
-		ClientOptions: policy.ClientOptions{
-			Logging: policy.LogOptions{
-				IncludeBody: true,
-			},
-		},
-	}
-
-	tmpClient, err := azopenaiassistants.NewClientForOpenAI(opt.OpenAI.Endpoint, azcore.NewKeyCredential(opt.OpenAI.Key), opts)
-	if err != nil {
-		log.Println(err.Error())
-		return nil
-	}
-	return tmpClient
 }
 
 // IsValidAssistantConfig 是否有效的AI助手配置
@@ -92,29 +45,31 @@ func (c *Client) GetAssistantConfig() *AssistantConfig {
 
 // UploadFileWithBinaryData 上传文件
 func (c *Client) UploadFileWithBinaryData(ctx context.Context, fileName string, fileData []byte, isAssistant bool) (string, error) {
-	var filePurpose azopenaiassistants.FilePurpose
-	if isAssistant {
-		filePurpose = azopenaiassistants.FilePurposeAssistants
-	} else {
-		filePurpose = azopenaiassistants.FilePurposeFineTune
+	purpose := "assistants"
+	if !isAssistant {
+		purpose = "fine-tune"
 	}
+	// go-openai v1.41.2 只支持 FilePath 字段，需写入临时文件
+	tmpFile, err := utils.WriteTempFile(fileName, fileData)
+	if err != nil {
+		log.Println("write temp file failed: ", err.Error())
+		return "", err
+	}
+	defer utils.RemoveFile(tmpFile)
 
-	// 上传文件
-	uploadResp, err := c.cli.UploadFile(ctx, bytes.NewReader(fileData),
-		filePurpose,
-		&azopenaiassistants.UploadFileOptions{
-			Filename: to.Ptr(fileName),
-		})
+	resp, err := c.cli.CreateFile(ctx, openai.FileRequest{
+		FileName: fileName,
+		Purpose:  purpose,
+		FilePath: tmpFile,
+	})
 	if err != nil {
 		log.Println("upload file failed: ", err.Error())
 		return "", err
 	}
-	log.Printf("upload file: [%s][%s]", *uploadResp.ID, *uploadResp.Filename)
-
-	c.cfg.FileId = *uploadResp.ID
+	log.Printf("upload file: [%s]", resp.ID)
+	c.cfg.FileId = resp.ID
 	_ = c.cfg.SaveConfig()
-
-	return *uploadResp.ID, nil
+	return resp.ID, nil
 }
 
 // UploadFile 上传文件
@@ -135,8 +90,7 @@ func (c *Client) UploadFile(ctx context.Context, uploadFilePath string, isAssist
 
 // DeleteFile 删除文件
 func (c *Client) DeleteFile(ctx context.Context, fileId string) error {
-
-	_, err := c.cli.DeleteFile(ctx, fileId, nil)
+	err := c.cli.DeleteFile(ctx, fileId)
 	return err
 }
 
@@ -149,7 +103,7 @@ func (c *Client) DestroyCurrentFile(ctx context.Context) error {
 
 // DeleteThread 删除对话
 func (c *Client) DeleteThread(ctx context.Context, threadID string) error {
-	_, err := c.cli.DeleteThread(ctx, threadID, nil)
+	_, err := c.cli.DeleteThread(ctx, threadID)
 	return err
 }
 
@@ -162,7 +116,7 @@ func (c *Client) DestroyCurrentThread(ctx context.Context) error {
 
 // DeleteAssistant 删除助手
 func (c *Client) DeleteAssistant(ctx context.Context, assistantID string) error {
-	_, err := c.cli.DeleteAssistant(ctx, assistantID, nil)
+	_, err := c.cli.DeleteAssistant(ctx, assistantID)
 	return err
 }
 
@@ -201,16 +155,42 @@ func (c *Client) UploadFileAndAssociateAssistant(ctx context.Context, uploadFile
 // associateAssistantFile 助手绑定文件
 func (c *Client) associateAssistantFile(assistantId, fileId string) error {
 	ctx := context.Background()
-	_, err := c.cli.CreateAssistantFile(ctx, assistantId, azopenaiassistants.CreateAssistantFileBody{
-		FileID: &fileId,
-	}, nil)
+	// go-openai 没有 AttachFileToAssistant，需用 UpdateAssistant 追加文件
+	assistant, err := c.cli.RetrieveAssistant(ctx, assistantId)
+	if err != nil {
+		return err
+	}
+	fileIDs := append(assistant.FileIDs, fileId)
+	_, err = c.cli.ModifyAssistant(ctx, assistantId, openai.AssistantRequest{
+		Name:         assistant.Name,
+		Description:  assistant.Description,
+		Instructions: assistant.Instructions,
+		Tools:        assistant.Tools,
+		FileIDs:      fileIDs,
+	})
 	return err
 }
 
 // deleteAssistantFile 删除掉助手绑定的文件
 func (c *Client) deleteAssistantFile(assistantId, fileId string) error {
 	ctx := context.Background()
-	_, err := c.cli.DeleteAssistantFile(ctx, assistantId, fileId, nil)
+	assistant, err := c.cli.RetrieveAssistant(ctx, assistantId)
+	if err != nil {
+		return err
+	}
+	var newFileIDs []string
+	for _, fid := range assistant.FileIDs {
+		if fid != fileId {
+			newFileIDs = append(newFileIDs, fid)
+		}
+	}
+	_, err = c.cli.ModifyAssistant(ctx, assistantId, openai.AssistantRequest{
+		Name:         assistant.Name,
+		Description:  assistant.Description,
+		Instructions: assistant.Instructions,
+		Tools:        assistant.Tools,
+		FileIDs:      newFileIDs,
+	})
 	return err
 }
 
@@ -231,41 +211,33 @@ func (c *Client) InitAssistantWithUploadFile(ctx context.Context, assistantName,
 
 // InitAssistant 创建助手
 func (c *Client) InitAssistant(ctx context.Context, assistantName, description, instructions, fileId string) error {
-	var err error
-
 	var fileIDs []string
 	if c.cfg.FileId != "" {
 		fileIDs = append(fileIDs, fileId)
 	}
-
-	// 创建助手
-	createAssistantResp, err := c.cli.CreateAssistant(ctx, azopenaiassistants.AssistantCreationBody{
-		Name:           to.Ptr(assistantName),
-		DeploymentName: to.Ptr(c.opt.GetDeploymentName()),
-		Description:    to.Ptr(description),
-		Instructions:   to.Ptr(instructions),
-		FileIDs:        fileIDs,
-		Tools: []azopenaiassistants.ToolDefinitionClassification{
-			&azopenaiassistants.CodeInterpreterToolDefinition{},
-			//&assistants.RetrievalToolDefinition{},
-		},
-	}, nil)
+	assistantReq := openai.AssistantRequest{
+		Name:         &assistantName,
+		Description:  &description,
+		Instructions: &instructions,
+		FileIDs:      fileIDs,
+		Tools:        []openai.AssistantTool{{Type: "code_interpreter"}},
+	}
+	assistant, err := c.cli.CreateAssistant(ctx, assistantReq)
 	if err != nil {
 		log.Println("create assistant failed: ", err.Error())
 		return err
 	}
-	log.Printf("create assistant: [%s][%s]", *createAssistantResp.ID, *createAssistantResp.DeploymentName)
+	log.Printf("create assistant: [%s]", assistant.ID)
 
-	// 创建线程
-	createThreadResp, err := c.cli.CreateThread(ctx, azopenaiassistants.AssistantThreadCreationOptions{}, nil)
+	thread, err := c.cli.CreateThread(ctx, openai.ThreadRequest{})
 	if err != nil {
 		log.Println("create thread failed: ", err.Error())
 		return err
 	}
-	log.Printf("create thread: [%s]", *createThreadResp.ID)
+	log.Printf("create thread: [%s]", thread.ID)
 
-	c.cfg.AssistantId = *createAssistantResp.ID
-	c.cfg.ThreadId = *createThreadResp.ID
+	c.cfg.AssistantId = assistant.ID
+	c.cfg.ThreadId = thread.ID
 	c.cfg.FileId = fileId
 
 	c.cfg.Name = assistantName
@@ -276,102 +248,66 @@ func (c *Client) InitAssistant(ctx context.Context, assistantName, description, 
 	return nil
 }
 
-func (c *Client) pollRunEnd(ctx context.Context, client *azopenaiassistants.Client, threadID string, runID string) error {
-	for {
-		lastGetRunResp, err := client.GetRun(ctx, threadID, runID, nil)
-
-		if err != nil {
-			return err
-		}
-
-		if *lastGetRunResp.Status != azopenaiassistants.RunStatusQueued && *lastGetRunResp.Status != azopenaiassistants.RunStatusInProgress {
-			if *lastGetRunResp.Status == azopenaiassistants.RunStatusCompleted {
-				return nil
-			}
-
-			return fmt.Errorf("run ended but status was not complete: %s", *lastGetRunResp.Status)
-		}
-
-		select {
-		case <-time.After(500 * time.Millisecond):
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-	}
-}
+// pollRunEnd 已废弃，go-openai SDK 不需要此方法
 
 // SendChatForAssistant 发送聊天到助理
 func (c *Client) SendChatForAssistant(message string, threadID *string) ([]string, error) {
 	ctx := context.Background()
 
-	var fileIDs []string
-	if c.cfg.FileId != "" {
-		fileIDs = append(fileIDs, c.cfg.FileId)
-	}
-
 	if threadID == nil || len(*threadID) == 0 {
 		threadID = &c.cfg.ThreadId
 	}
 
-	_, err := c.cli.CreateMessage(ctx, *threadID, azopenaiassistants.CreateMessageBody{
-		Content: to.Ptr(message),
-		Role:    to.Ptr(azopenaiassistants.MessageRoleUser),
-		FileIDs: fileIDs,
-	}, nil)
+	// 创建消息
+	_, err := c.cli.CreateMessage(ctx, *threadID, openai.MessageRequest{
+		Role:    "user",
+		Content: message,
+	})
 	if err != nil {
 		return nil, err
 	}
-	//log.Printf("create message: [%s]", *createMessageResp.ID)
 
-	createRunResp, err := c.cli.CreateRun(ctx, *threadID, azopenaiassistants.CreateRunBody{
-		AssistantID: &c.cfg.AssistantId,
-	}, nil)
+	// 创建 Run
+	run, err := c.cli.CreateRun(ctx, *threadID, openai.RunRequest{
+		AssistantID: c.cfg.AssistantId,
+	})
 	if err != nil {
 		return nil, err
 	}
-	//log.Printf("create run: [%s]", *createRunResp.ID)
-	runId := *createRunResp.ID
 
-	err = c.pollRunEnd(ctx, c.cli, *threadID, runId)
-
-	var chatMessages []string
-	listMessagesPager := c.cli.NewListRunStepsPager(*threadID, runId, nil)
-	for listMessagesPager.More() {
-		page, err := listMessagesPager.NextPage(ctx)
+	// 轮询 Run 状态直到完成
+	for {
+		runStatus, err := c.cli.RetrieveRun(ctx, *threadID, run.ID)
 		if err != nil {
-			continue
+			return nil, err
 		}
-
-		for _, runStep := range page.Data {
-			_, err := c.cli.GetRunStep(ctx, *threadID, runId, *runStep.ID, nil)
-			if err != nil {
-				continue
-			}
-			//log.Printf("get run step: [%s][%s][%s]", *rereadRunStep.ID, *rereadRunStep.ThreadID, *rereadRunStep.RunID)
-
-			if runStep.StepDetails == nil {
-				continue
-			}
-
-			switch t := runStep.StepDetails.(type) {
-			case *azopenaiassistants.RunStepMessageCreationDetails:
-				messageResp, err := c.cli.GetMessage(ctx, *threadID, *t.MessageCreation.MessageID, nil)
-				if err != nil {
-					continue
-				}
-				if *messageResp.Role == azopenaiassistants.MessageRoleAssistant {
-					body := *messageResp.Content[0].(*azopenaiassistants.MessageTextContent).Text.Value
-
-					fmt.Printf("Assistant response: %s\n", body)
-
-					chatMessages = append(chatMessages, body)
-				}
-
-			case *azopenaiassistants.RunStepToolCallDetails:
-			}
-
+		if runStatus.Status == "completed" {
+			break
+		}
+		if runStatus.Status == "failed" || runStatus.Status == "cancelled" || runStatus.Status == "expired" {
+			return nil, fmt.Errorf("run ended but status was not complete: %s", runStatus.Status)
+		}
+		select {
+		case <-time.After(500 * time.Millisecond):
+		case <-ctx.Done():
+			return nil, ctx.Err()
 		}
 	}
 
+	// 获取消息
+	resp, err := c.cli.ListMessage(ctx, *threadID, nil, nil, nil, nil, nil)
+	if err != nil {
+		return nil, err
+	}
+	var chatMessages []string
+	for _, msg := range resp.Messages {
+		if msg.Role == "assistant" {
+			for _, c := range msg.Content {
+				if c.Type == "text" && c.Text != nil {
+					chatMessages = append(chatMessages, c.Text.Value)
+				}
+			}
+		}
+	}
 	return chatMessages, nil
 }
